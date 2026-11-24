@@ -1,8 +1,7 @@
 
 import logging
-import os
-
 from faster_whisper import WhisperModel
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -10,27 +9,22 @@ logger = logging.getLogger(__name__)
 class SpeechService:
 
     def __init__(self):
-        logger.info("Loading Faster-Whisper model...")
+        logger.info(
+            "Loading Faster-Whisper model: %s",
+            settings.WHISPER_MODEL
+        )
 
         self.model = WhisperModel(
-            "small",
-            device="cpu",
-            compute_type="int8"
+            settings.WHISPER_MODEL,
+            device=settings.DEVICE,
+            compute_type=settings.COMPUTE_TYPE
         )
 
         logger.info("Whisper model loaded successfully.")
 
     def transcribe_audio(self, audio):
         try:
-            if audio is None or len(audio) == 0:
-                return {
-                    "text": "",
-                    "language": "unknown",
-                    "language_probability": 0.0
-                }
-
-            # Ignore very short audio chunks
-            if len(audio) < 16000:
+            if audio is None or len(audio) < 16000:
                 return {
                     "text": "",
                     "language": "unknown",
@@ -40,16 +34,14 @@ class SpeechService:
             segments, info = self.model.transcribe(
                 audio,
                 language=None,
-                beam_size=5,
+                beam_size=3,
                 vad_filter=True,
                 vad_parameters={
                     "min_silence_duration_ms": 500,
                     "speech_pad_ms": 200
                 },
                 condition_on_previous_text=False,
-                no_speech_threshold=0.6,
-                compression_ratio_threshold=2.4,
-                log_prob_threshold=-1.0
+                no_speech_threshold=0.6
             )
 
             transcription = " ".join(
@@ -62,7 +54,8 @@ class SpeechService:
                 "text": transcription.strip(),
                 "language": info.language or "unknown",
                 "language_probability": round(
-                    info.language_probability or 0.0, 3
+                    info.language_probability or 0.0,
+                    3
                 )
             }
 
