@@ -1,3 +1,4 @@
+
 import json
 import logging
 
@@ -17,43 +18,31 @@ CHUNK_SIZE = SAMPLE_RATE * CHUNK_SECONDS
 
 async def process_audio(websocket: WebSocket, audio: np.ndarray):
     if audio.size == 0:
-        logger.warning("Received empty audio buffer")
+        logger.warning("Received empty audio")
         return
 
-    duration = len(audio) / SAMPLE_RATE
-
     logger.info(
-        "Starting transcription: %.2f seconds of audio, %d samples",
-        duration,
-        len(audio)
+        "Starting transcription: %.2f seconds of audio",
+        len(audio) / SAMPLE_RATE
     )
 
-    try:
-        result = await run_in_threadpool(
-            speech_service.transcribe_audio,
-            audio
-        )
+    result = await run_in_threadpool(
+        speech_service.transcribe_audio,
+        audio
+    )
 
-        logger.info(
-            "Transcription finished: text_length=%d, language=%s",
-            len(result.get("text", "")),
-            result.get("language", "unknown")
-        )
+    logger.info(
+        "Transcription finished. Text length: %d, Language: %s",
+        len(result["text"]),
+        result["language"]
+    )
 
-        await websocket.send_json({
-            "type": "transcription",
-            "text": result["text"],
-            "language": result["language"],
-            "language_probability": result["language_probability"]
-        })
-
-    except Exception:
-        logger.exception("Audio processing failed")
-
-        await websocket.send_json({
-            "type": "error",
-            "message": "Unable to process audio. Please try again."
-        })
+    await websocket.send_json({
+        "type": "transcription",
+        "text": result["text"],
+        "language": result["language"],
+        "language_probability": result["language_probability"]
+    })
 
 
 @router.websocket("/ws/transcribe")
@@ -76,12 +65,7 @@ async def transcribe_stream(websocket: WebSocket):
 
             if message.get("bytes") is not None:
                 raw_audio = message["bytes"]
-
-                if not raw_audio:
-                    continue
-
                 total_bytes += len(raw_audio)
-                chunk_count += 1
 
                 audio_chunk = np.frombuffer(
                     raw_audio,
@@ -92,7 +76,6 @@ async def transcribe_stream(websocket: WebSocket):
                     continue
 
                 if not np.isfinite(audio_chunk).all():
-                    logger.warning("Invalid audio data received")
                     await websocket.send_json({
                         "type": "error",
                         "message": "Invalid audio data received"
@@ -103,17 +86,12 @@ async def transcribe_stream(websocket: WebSocket):
                     [audio_buffer, audio_chunk]
                 )
 
-                if chunk_count % 50 == 0:
-                    logger.info(
-                        "Audio received: chunks=%d, bytes=%d, buffered_samples=%d",
-                        chunk_count,
-                        total_bytes,
-                        len(audio_buffer)
-                    )
-
                 while len(audio_buffer) >= CHUNK_SIZE:
                     current_audio = audio_buffer[:CHUNK_SIZE]
                     audio_buffer = audio_buffer[CHUNK_SIZE:]
+
+                    chunk_count += 1
+                    logger.info("Processing audio chunk %d", chunk_count)
 
                     await process_audio(websocket, current_audio)
 
@@ -121,7 +99,6 @@ async def transcribe_stream(websocket: WebSocket):
                 try:
                     command = json.loads(message["text"])
                 except json.JSONDecodeError:
-                    logger.warning("Invalid JSON command received")
                     await websocket.send_json({
                         "type": "error",
                         "message": "Invalid JSON command"
@@ -130,15 +107,14 @@ async def transcribe_stream(websocket: WebSocket):
 
                 if command.get("action") == "stop":
                     logger.info(
-                        "Stop command received: chunks=%d, bytes=%d, remaining_samples=%d",
-                        chunk_count,
+                        "Stop received. Total audio bytes: %d, chunks: %d, remaining samples: %d",
                         total_bytes,
+                        chunk_count,
                         len(audio_buffer)
                     )
 
                     if len(audio_buffer) > 0:
                         await process_audio(websocket, audio_buffer)
-                        audio_buffer = np.array([], dtype=np.float32)
 
                     await websocket.send_json({
                         "type": "completed",
@@ -152,12 +128,12 @@ async def transcribe_stream(websocket: WebSocket):
         logger.info("WebSocket disconnected")
 
     except Exception:
-        logger.exception("WebSocket transcription error")
+        logger.exception("Speech WebSocket error")
 
         try:
             await websocket.send_json({
                 "type": "error",
-                "message": "Speech transcription failed"
+                "message": "Speech transcription failed. Check server logs."
             })
         except Exception:
             pass
