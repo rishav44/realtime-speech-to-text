@@ -19,11 +19,15 @@ CHUNK_SIZE = SAMPLE_RATE * CHUNK_SECONDS
 async def process_audio(websocket: WebSocket, audio: np.ndarray):
     if audio.size == 0:
         logger.warning("Received empty audio")
+        print("DEBUG: RECEIVED EMPTY AUDIO", flush=True)
         return
 
-    logger.info(
-        "Starting transcription: %.2f seconds of audio",
-        len(audio) / SAMPLE_RATE
+    duration = len(audio) / SAMPLE_RATE
+
+    logger.info("Starting transcription: %.2f seconds", duration)
+    print(
+        f"DEBUG: STARTING TRANSCRIPTION - {duration:.2f} seconds",
+        flush=True
     )
 
     result = await run_in_threadpool(
@@ -37,6 +41,13 @@ async def process_audio(websocket: WebSocket, audio: np.ndarray):
         result["language"]
     )
 
+    print(
+        f"DEBUG: TRANSCRIPTION FINISHED - "
+        f"Text length: {len(result['text'])}, "
+        f"Language: {result['language']}",
+        flush=True
+    )
+
     await websocket.send_json({
         "type": "transcription",
         "text": result["text"],
@@ -47,23 +58,31 @@ async def process_audio(websocket: WebSocket, audio: np.ndarray):
 
 @router.websocket("/ws/transcribe")
 async def transcribe_stream(websocket: WebSocket):
+
     await websocket.accept()
+
+    print("DEBUG: SPEECH WEBSOCKET ENDPOINT REACHED", flush=True)
 
     audio_buffer = np.array([], dtype=np.float32)
     total_bytes = 0
     chunk_count = 0
 
     logger.info("WebSocket connection established")
+    print("DEBUG: WEBSOCKET CONNECTION ESTABLISHED", flush=True)
 
     try:
         while True:
+
             message = await websocket.receive()
 
             if message["type"] == "websocket.disconnect":
                 logger.info("Client disconnected")
+                print("DEBUG: CLIENT DISCONNECTED", flush=True)
                 break
 
+            # Receive audio bytes from browser
             if message.get("bytes") is not None:
+
                 raw_audio = message["bytes"]
                 total_bytes += len(raw_audio)
 
@@ -86,18 +105,42 @@ async def transcribe_stream(websocket: WebSocket):
                     [audio_buffer, audio_chunk]
                 )
 
+                print(
+                    f"DEBUG: AUDIO RECEIVED - "
+                    f"{len(audio_chunk)} samples, "
+                    f"Total bytes: {total_bytes}",
+                    flush=True
+                )
+
+                # Process audio in 4-second chunks
                 while len(audio_buffer) >= CHUNK_SIZE:
+
                     current_audio = audio_buffer[:CHUNK_SIZE]
                     audio_buffer = audio_buffer[CHUNK_SIZE:]
 
                     chunk_count += 1
-                    logger.info("Processing audio chunk %d", chunk_count)
 
-                    await process_audio(websocket, current_audio)
+                    logger.info(
+                        "Processing audio chunk %d",
+                        chunk_count
+                    )
 
+                    print(
+                        f"DEBUG: PROCESSING AUDIO CHUNK {chunk_count}",
+                        flush=True
+                    )
+
+                    await process_audio(
+                        websocket,
+                        current_audio
+                    )
+
+            # Receive stop command
             elif message.get("text"):
+
                 try:
                     command = json.loads(message["text"])
+
                 except json.JSONDecodeError:
                     await websocket.send_json({
                         "type": "error",
@@ -106,15 +149,30 @@ async def transcribe_stream(websocket: WebSocket):
                     continue
 
                 if command.get("action") == "stop":
+
                     logger.info(
-                        "Stop received. Total audio bytes: %d, chunks: %d, remaining samples: %d",
+                        "Stop received. Total audio bytes: %d, "
+                        "chunks: %d, remaining samples: %d",
                         total_bytes,
                         chunk_count,
                         len(audio_buffer)
                     )
 
+                    print(
+                        f"DEBUG: STOP RECEIVED - "
+                        f"Total bytes: {total_bytes}, "
+                        f"Chunks: {chunk_count}, "
+                        f"Remaining samples: {len(audio_buffer)}",
+                        flush=True
+                    )
+
+                    # Process remaining audio
                     if len(audio_buffer) > 0:
-                        await process_audio(websocket, audio_buffer)
+
+                        await process_audio(
+                            websocket,
+                            audio_buffer
+                        )
 
                     await websocket.send_json({
                         "type": "completed",
@@ -122,26 +180,44 @@ async def transcribe_stream(websocket: WebSocket):
                     })
 
                     logger.info("Transcription completed successfully")
+
+                    print(
+                        "DEBUG: TRANSCRIPTION COMPLETED SUCCESSFULLY",
+                        flush=True
+                    )
+
                     break
 
     except WebSocketDisconnect:
-        logger.info("WebSocket disconnected")
 
-    except Exception:
-        logger.exception("Speech WebSocket error")
+        logger.info("WebSocket disconnected")
+        print("DEBUG: WEBSOCKET DISCONNECTED", flush=True)
+
+    except Exception as error:
+
+        logger.exception("Speech WebSocket error: %s", error)
+
+        print(
+            f"DEBUG: WEBSOCKET ERROR - {error}",
+            flush=True
+        )
 
         try:
             await websocket.send_json({
                 "type": "error",
                 "message": "Speech transcription failed. Check server logs."
             })
+
         except Exception:
             pass
 
     finally:
+
         try:
             await websocket.close()
+
         except Exception:
             pass
 
         logger.info("WebSocket connection closed")
+        print("DEBUG: WEBSOCKET CONNECTION CLOSED", flush=True)
