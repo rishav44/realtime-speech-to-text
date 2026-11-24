@@ -1,0 +1,548 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VoiceFlow - AI Speech to Text</title>
+
+    <style>
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #f4f6fb;
+            color: #182033;
+        }
+
+        header {
+            background: #172554;
+            color: white;
+            padding: 22px 7%;
+        }
+
+        header h2 { margin: 0; }
+        header p { color: #cbd5e1; margin-bottom: 0; }
+
+        .container {
+            max-width: 1050px;
+            margin: 35px auto;
+            padding: 0 20px;
+        }
+
+        .card {
+            background: white;
+            border-radius: 14px;
+            padding: 25px;
+            margin-bottom: 22px;
+            box-shadow: 0 4px 20px rgba(0,0,0,.04);
+        }
+
+        h3 { margin-top: 0; }
+
+        .center { text-align: center; }
+
+        .mic {
+            width: 85px;
+            height: 85px;
+            border-radius: 50%;
+            background: #e0e7ff;
+            color: #3730a3;
+            border: none;
+            font-size: 34px;
+            cursor: pointer;
+        }
+
+        .recording {
+            background: #fee2e2;
+            color: #dc2626;
+            animation: pulse 1.2s infinite;
+        }
+
+        @keyframes pulse {
+            50% { box-shadow: 0 0 0 12px rgba(220,38,38,.12); }
+        }
+
+        button {
+            border: none;
+            border-radius: 8px;
+            padding: 11px 18px;
+            cursor: pointer;
+            font-weight: 600;
+            margin: 5px;
+        }
+
+        .primary { background: #4f46e5; color: white; }
+        .secondary { background: #e2e8f0; color: #1e293b; }
+        .danger { background: #fee2e2; color: #b91c1c; }
+
+        #liveText {
+            min-height: 120px;
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            padding: 18px;
+            border-radius: 10px;
+            line-height: 1.8;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
+
+        .status {
+            color: #64748b;
+            margin: 15px 0;
+        }
+
+        .history-item {
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            padding: 16px;
+            margin-top: 12px;
+        }
+
+        .history-item h4 { margin: 0 0 8px; }
+        .history-item p { color: #475569; overflow-wrap: anywhere; }
+
+        input, textarea {
+            width: 100%;
+            padding: 12px;
+            margin: 8px 0;
+            border: 1px solid #cbd5e1;
+            border-radius: 7px;
+            font: inherit;
+        }
+
+        textarea { min-height: 90px; }
+
+        .meta { color: #64748b; font-size: 13px; }
+
+        footer {
+            text-align: center;
+            color: #64748b;
+            padding: 25px;
+        }
+    </style>
+</head>
+
+<body>
+
+<header>
+    <h2>🎙️ VoiceFlow AI</h2>
+    <p>Real-Time Multilingual Speech-to-Text Platform</p>
+</header>
+
+<div class="container">
+
+    <section class="card center">
+        <h3>Live Speech Recognition</h3>
+
+        <p>Speak naturally in Hindi, English or a mixture of both.</p>
+
+        <button id="recordButton" class="mic" onclick="toggleRecording()">
+            🎤
+        </button>
+
+        <div id="status" class="status">Ready to record</div>
+
+        <button class="secondary" onclick="clearTranscript()">
+            Clear
+        </button>
+
+        <button class="primary" onclick="saveTranscript()">
+            Save Transcription
+        </button>
+    </section>
+
+    <section class="card">
+        <h3>Live Transcription</h3>
+        <div id="liveText">Your recognized speech will appear here...</div>
+        <p class="meta" id="language">Detected language: Waiting...</p>
+    </section>
+
+    <section class="card">
+        <h3>Transcription Dashboard</h3>
+        <p class="meta">View, edit and delete your previous transcriptions.</p>
+        <div id="history">
+            Loading transcription history...
+        </div>
+    </section>
+
+</div>
+
+<footer>
+    Powered by FastAPI, Faster-Whisper and SQLite
+</footer>
+
+<script>
+    const API = window.location.origin;
+
+    let socket = null;
+    let audioContext = null;
+    let mediaStream = null;
+    let processor = null;
+    let recording = false;
+    let transcript = "";
+    let detectedLanguage = "";
+    let startedAt = 0;
+    let currentDuration = 0;
+
+    const liveText = document.getElementById("liveText");
+    const status = document.getElementById("status");
+    const recordButton = document.getElementById("recordButton");
+    const languageLabel = document.getElementById("language");
+
+    function updateTranscript() {
+        liveText.textContent = transcript || "Listening for speech...";
+    }
+
+    function resample(input, inputRate, outputRate) {
+
+        if (inputRate === outputRate) {
+            return new Float32Array(input);
+        }
+
+        const ratio = inputRate / outputRate;
+        const outputLength = Math.floor(input.length / ratio);
+        const output = new Float32Array(outputLength);
+
+        for (let i = 0; i < outputLength; i++) {
+            const position = i * ratio;
+            const index = Math.floor(position);
+            const fraction = position - index;
+
+            const nextIndex = Math.min(index + 1, input.length - 1);
+
+            output[i] =
+                input[index] * (1 - fraction) +
+                input[nextIndex] * fraction;
+        }
+
+        return output;
+    }
+
+    async function startRecording() {
+
+        try {
+            status.textContent = "Requesting microphone permission...";
+
+            mediaStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    channelCount: 1,
+                    echoCancellation: true,
+                    noiseSuppression: true
+                }
+            });
+
+            socket = new WebSocket(
+                (location.protocol === "https:" ? "wss://" : "ws://") +
+                location.host + "/ws/transcribe"
+            );
+
+            socket.onopen = async () => {
+
+                audioContext = new AudioContext();
+
+                await audioContext.resume();
+
+                const source = audioContext.createMediaStreamSource(
+                    mediaStream
+                );
+
+                processor = audioContext.createScriptProcessor(
+                    4096, 1, 1
+                );
+
+                processor.onaudioprocess = (event) => {
+
+                    if (!recording || socket.readyState !== WebSocket.OPEN) {
+                        return;
+                    }
+
+                    const input = event.inputBuffer.getChannelData(0);
+
+                    const audio = resample(
+                        input,
+                        audioContext.sampleRate,
+                        16000
+                    );
+
+                    socket.send(audio.buffer);
+                };
+
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+
+                recording = true;
+                startedAt = Date.now();
+
+                recordButton.classList.add("recording");
+                recordButton.textContent = "⏹";
+                status.textContent = "🔴 Recording and transcribing...";
+            };
+
+            socket.onmessage = (event) => {
+
+                const data = JSON.parse(event.data);
+
+                if (data.type === "transcription") {
+
+                    if (data.text) {
+                        transcript += (transcript ? " " : "") + data.text;
+                        updateTranscript();
+                    }
+
+                    detectedLanguage = data.language || "";
+
+                    languageLabel.textContent =
+                        "Detected language: " + detectedLanguage;
+                }
+
+                if (data.type === "completed") {
+                    status.textContent = "Transcription completed";
+
+                    if (transcript.trim()) {
+                        saveTranscript();
+                    }
+                }
+
+                if (data.type === "error") {
+                    status.textContent = "Error: " + data.message;
+                }
+            };
+
+            socket.onerror = () => {
+                status.textContent = "WebSocket connection error";
+            };
+
+            socket.onclose = () => {
+                if (recording) {
+                    stopAudio();
+                    status.textContent = "Connection closed";
+                }
+            };
+
+        } catch (error) {
+            status.textContent = "Microphone error: " + error.message;
+            stopAudio();
+        }
+    }
+
+    function stopAudio() {
+
+        recording = false;
+
+        recordButton.classList.remove("recording");
+        recordButton.textContent = "🎤";
+
+        if (processor) {
+            processor.disconnect();
+            processor = null;
+        }
+
+        if (mediaStream) {
+            mediaStream.getTracks().forEach(track => track.stop());
+            mediaStream = null;
+        }
+
+        if (audioContext) {
+            audioContext.close();
+            audioContext = null;
+        }
+    }
+
+    function stopRecording() {
+
+        if (!recording) return;
+
+        currentDuration = Math.round((Date.now() - startedAt) / 1000);
+
+        stopAudio();
+
+        status.textContent = "Processing remaining audio...";
+
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ action: "stop" }));
+        }
+    }
+
+    function toggleRecording() {
+
+        if (recording) {
+            stopRecording();
+        } else {
+            startRecording();
+        }
+    }
+
+    function clearTranscript() {
+
+        if (recording) {
+            alert("Stop recording before clearing the transcript.");
+            return;
+        }
+
+        transcript = "";
+        detectedLanguage = "";
+        updateTranscript();
+
+        languageLabel.textContent = "Detected language: Waiting...";
+    }
+
+    async function saveTranscript() {
+
+        if (!transcript.trim()) {
+            alert("No transcription available to save.");
+            return;
+        }
+
+        const title = prompt("Enter transcription title:");
+
+        if (title === null) return;
+
+        try {
+
+            const response = await fetch(API + "/api/transcriptions/", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    title: title.trim() || "Untitled Transcription",
+                    text: transcript,
+                    language: detectedLanguage || "Unknown",
+                    duration: currentDuration
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error("Could not save transcription");
+            }
+
+            alert("Transcription saved successfully!");
+
+            await loadHistory();
+
+        } catch (error) {
+            alert(error.message);
+        }
+    }
+
+    async function loadHistory() {
+
+        const history = document.getElementById("history");
+
+        try {
+
+            const response = await fetch(API + "/api/transcriptions/");
+
+            if (!response.ok) {
+                throw new Error("Failed to load history");
+            }
+
+            const records = await response.json();
+
+            history.replaceChildren();
+
+            if (records.length === 0) {
+                history.textContent = "No transcription history available.";
+                return;
+            }
+
+            records.forEach(record => {
+
+                const item = document.createElement("div");
+                item.className = "history-item";
+
+                const heading = document.createElement("h4");
+                heading.textContent = record.title;
+
+                const paragraph = document.createElement("p");
+                paragraph.textContent = record.text;
+
+                const meta = document.createElement("div");
+                meta.className = "meta";
+                meta.textContent =
+                    "Language: " + (record.language || "Unknown") +
+                    " | Duration: " + (record.duration || 0) + " sec";
+
+                const editButton = document.createElement("button");
+                editButton.className = "secondary";
+                editButton.textContent = "Edit";
+                editButton.onclick = () => editRecord(record);
+
+                const deleteButton = document.createElement("button");
+                deleteButton.className = "danger";
+                deleteButton.textContent = "Delete";
+                deleteButton.onclick = () => deleteRecord(record.id);
+
+                item.append(heading, paragraph, meta, editButton, deleteButton);
+                history.appendChild(item);
+            });
+
+        } catch (error) {
+            history.textContent = error.message;
+        }
+    }
+
+    async function editRecord(record) {
+
+        const newTitle = prompt("Update title:", record.title);
+
+        if (newTitle === null) return;
+
+        const newText = prompt("Update transcription:", record.text);
+
+        if (newText === null) return;
+
+        try {
+
+            const response = await fetch(
+                API + "/api/transcriptions/" + record.id,
+                {
+                    method: "PUT",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        title: newTitle,
+                        text: newText
+                    })
+                }
+            );
+
+            if (!response.ok) throw new Error("Update failed");
+
+            await loadHistory();
+
+        } catch (error) {
+            alert(error.message);
+        }
+    }
+
+    async function deleteRecord(id) {
+
+        if (!confirm("Are you sure you want to delete this transcription?")) {
+            return;
+        }
+
+        try {
+
+            const response = await fetch(
+                API + "/api/transcriptions/" + id,
+                { method: "DELETE" }
+            );
+
+            if (!response.ok) throw new Error("Delete failed");
+
+            await loadHistory();
+
+        } catch (error) {
+            alert(error.message);
+        }
+    }
+
+    loadHistory();
+</script>
+
+</body>
+</html>
